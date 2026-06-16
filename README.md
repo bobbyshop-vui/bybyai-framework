@@ -7,14 +7,10 @@ A macOS Metal GPU framework for training and inference of Transformer language m
 ## Installation
 
 ```bash
-# Install from source (setup.py + metal_ai.py in the same folder)
-pip install -e .
-
-# Or from a built wheel
-pip install metal_ai-0.1.0-py3-none-any.whl
+pip install git+https://github.com/bobbyshop-vui/bybyai-framework
 ```
 
-**Requirements:** macOS, Python ≥ 3.10, Metal-capable GPU (Apple Silicon or AMD).
+**Requirements:** macOS, Python ≥ 3.10, Apple Silicon (M1/M2/M3/M4) or any Mac with Metal support.
 
 ---
 
@@ -32,6 +28,9 @@ from metal_ai import MetalCharLM, CharTokenizer, build_dataset
 texts = ["hello world", "training data here", "more text..."]
 tok = CharTokenizer(texts)
 print(tok.vocab_size)   # number of unique characters
+
+# Save vocab to JSON
+tok.save("tokenizer.json")
 ```
 
 ### 3. Build a dataset
@@ -53,9 +52,12 @@ model = MetalCharLM(
     num_layers = 8,
     lr         = 1e-3,
 )
+# Prints: >>> Model initialized: vocab=..., hidden_dim=256, layers=8
 ```
 
 ### 5. Train
+
+Checkpoints are saved **automatically** every step as `checkpoint_step{N}.bybyai` in the current directory. You do not choose the filename — it is always `checkpoint_step1.bybyai`, `checkpoint_step2.bybyai`, etc.
 
 ```python
 trainer = MetalCharLM(vocab=tok.vocab_size)
@@ -68,9 +70,25 @@ trained_model = trainer.train(
     BATCH_SIZE = 32,
     lr_base    = 1e-4,
 )
+# Auto-saves: checkpoint_step1.bybyai, checkpoint_step2.bybyai, ...
 ```
 
-Resume from a checkpoint:
+Resume from the latest checkpoint automatically:
+
+```python
+# trainer.train() auto-detects the latest checkpoint_stepN.bybyai
+# in the current directory and resumes from it
+trained_model = trainer.train(
+    model      = model,
+    X          = X,
+    Y          = Y,
+    steps      = 200,
+    BATCH_SIZE = 32,
+    lr_base    = 1e-4,
+)
+```
+
+Or resume from a specific checkpoint:
 
 ```python
 trained_model = trainer.train(
@@ -84,53 +102,13 @@ trained_model = trainer.train(
 )
 ```
 
-### 6. Generate text
+### 6. Streaming training (large datasets that don't fit in RAM)
 
-```python
-output = model.generate(
-    tokenizer   = tok,
-    prompt      = "hello",
-    max_new     = 200,
-    ctx         = 512,
-    temperature = 0.8,
-    top_p       = 0.9,
-)
-print(output)
-```
-
-### 7. Save and load
-
-```python
-# Save as binary .bybyai (fast, compact)
-model.save("my_model.bybyai")
-model.load("my_model.bybyai")
-
-# Save as safetensors (HuggingFace compatible)
-model.save("my_model.safetensors")
-```
-
-### 8. Inspect a checkpoint without loading weights
-
-```python
-info = MetalCharLM.peek_checkpoint("checkpoint_step50.bybyai")
-print(info)
-# {'step': 50, 'vocab': 128, 'embed_dim': 256, 'hidden_dim': 256}
-```
-
-### 9. Merge checkpoints (model averaging)
-
-```python
-from metal_ai import merge_all_checkpoints
-
-# Averages all checkpoint_stepN.bybyai files in the current directory
-averaged_weights = merge_all_checkpoints()
-```
-
-### 10. Streaming training (large datasets, low RAM)
+Same auto-checkpoint behaviour — saves `checkpoint_step{N}.bybyai` every step.
 
 ```python
 def my_generator():
-    for chunk in load_chunks():
+    for chunk in load_chunks():          # your own chunk loader
         X, Y = build_dataset(chunk, tok, seq_len=32)
         yield X, Y
 
@@ -143,7 +121,7 @@ trainer.train_streaming(
 )
 ```
 
-### 11. Fine-tune
+### 7. Fine-tune
 
 ```python
 trainer.finetune(
@@ -159,6 +137,49 @@ trainer.finetune(
 )
 ```
 
+### 8. Generate text
+
+```python
+output = model.generate(
+    tokenizer   = tok,
+    prompt      = "hello",
+    max_new     = 200,
+    ctx         = 512,
+    temperature = 0.8,
+    top_p       = 0.9,
+)
+print(output)
+```
+
+### 9. Save and load model
+
+```python
+# Binary format (fast, compact)
+model.save("my_model.bybyai")
+model.load("my_model.bybyai")
+
+# SafeTensors format (HuggingFace compatible)
+model.save("my_model.safetensors")
+```
+
+### 10. Inspect a checkpoint without loading weights
+
+```python
+info = MetalCharLM.peek_checkpoint("checkpoint_step50.bybyai")
+print(info)
+# {'step': 50, 'vocab': 128, 'embed_dim': 256, 'hidden_dim': 256}
+```
+
+### 11. Merge / average all checkpoints
+
+```python
+from metal_ai import merge_all_checkpoints
+
+# Finds all checkpoint_stepN.bybyai in current directory,
+# averages their weights, and returns the result dict
+averaged = merge_all_checkpoints()
+```
+
 ---
 
 ## API Reference
@@ -167,31 +188,115 @@ trainer.finetune(
 |------|-------------|
 | `MetalCharLM` | Main model — transformer LM on Metal GPU |
 | `CharTokenizer` | Character-level tokenizer |
-| `build_dataset` | Build `(X, Y)` from a list of strings |
-| `merge_all_checkpoints` | Average weights across multiple checkpoints |
+| `build_dataset(texts, tok, seq_len, max_samples)` | Build `(X, Y)` from a list of strings |
+| `merge_all_checkpoints()` | Average weights across all `checkpoint_stepN.bybyai` files |
 | `MetalTensor` | Low-level Metal GPU tensor |
 | `MetalLinear` | Linear layer on Metal |
 | `MetalLayerNorm` | Layer normalization on Metal |
 | `MetalAdam` | Pure-NumPy Adam optimizer |
 | `MetalSequential` | Sequential layer container |
-| `sample_top_p` | Top-p sampling for generation |
-| `gpu_cleanup` | Clear GPU buffer pool |
-| `cleanup_tensors` | Clear tinygrad tensor cache |
+| `sample_top_p(logits, p, temperature)` | Top-p nucleus sampling |
+| `gpu_cleanup()` | Trim GPU buffer pool |
+| `cleanup_tensors()` | Clear tinygrad tensor cache |
 
 ---
 
-## Checkpoint formats
+## Checkpoint behaviour
 
-| Format | Extension | When to use |
+Checkpoints are **always** named `checkpoint_step{N}.bybyai` and saved in the **current working directory**. There is no option to change the filename or location. On resume, the trainer scans the current directory for the latest `checkpoint_stepN.bybyai` automatically.
+
+| Format | Extension | Description |
 |--------|-----------|-------------|
-| Custom binary | `.bybyai` | Default — fastest, smallest |
-| SafeTensors | `.safetensors` | Sharing with HuggingFace ecosystem |
-| Pickle state dict | `.bybyai` (auto) | Auto-saved every step during training |
+| Training state | `checkpoint_step{N}.bybyai` | Auto-saved every step; contains weights + step number |
+| Full model binary | `.bybyai` (via `model.save()`) | Compact binary; load with `model.load()` |
+| SafeTensors | `.safetensors` | HuggingFace-compatible export |
 
 ---
 
-## Notes
+## Metal Math Operations
+
+Low-level GPU operations available as standalone functions. All inputs can be either `MetalTensor` or `numpy.ndarray` — they are converted automatically.
+
+```python
+from metal_ai import (
+    metal_add, metal_mul, metal_matmul,
+    metal_relu, metal_sigmoid, metal_tanh,
+    metal_softmax, metal_layernorm,
+    metal_mean, metal_sum, metal_reshape,
+    metal_embedding_lookup,
+)
+```
+
+### Arithmetic
+
+```python
+# Element-wise addition
+c = metal_add(a, b)        # a + b
+
+# Element-wise multiplication
+c = metal_mul(a, b)        # a * b
+
+# Matrix multiplication (2D only)
+c = metal_matmul(a, b)     # (M, K) @ (K, N) → (M, N)
+```
+
+### Activations
+
+```python
+y = metal_relu(x)          # max(0, x)
+y = metal_sigmoid(x)       # 1 / (1 + exp(-x))
+y = metal_tanh(x)          # tanh(x)
+y = metal_softmax(x, axis=-1)   # softmax along last axis only
+```
+
+### Normalization
+
+```python
+# Layer normalization
+# weight and bias must match the last dim of x
+y = metal_layernorm(x, weight, bias, eps=1e-5)
+```
+
+### Reductions
+
+```python
+mean_all = metal_mean(x)              # scalar mean over all elements
+mean_ax  = metal_mean(x, axis=1)      # mean along axis
+
+sum_all  = metal_sum(x)               # scalar sum
+sum_ax   = metal_sum(x, axis=0)       # sum along axis
+```
+
+### Shape & Indexing
+
+```python
+# Reshape (metadata-only, no GPU copy)
+y = metal_reshape(x, (new_shape,))
+
+# Embedding lookup — indices shape (B, T) → output (B, T, embed_dim)
+out = metal_embedding_lookup(embed_table, indices)
+```
+
+### Notes
+
+- All operations run on the Metal GPU and return a `MetalTensor`.
+- Call `.numpy()` on the result to get a `numpy.ndarray` back on CPU.
+- `metal_softmax` only supports the last axis (`axis=-1`).
+- `metal_matmul` requires exactly 2D inputs `(M, K)` and `(K, N)`.
+
+```python
+# Example
+import numpy as np
+from metal_ai import MetalTensor, metal_relu, metal_matmul
+
+a = MetalTensor(np.random.randn(4, 8).astype("float32"))
+b = MetalTensor(np.random.randn(8, 16).astype("float32"))
+
+c = metal_matmul(a, b)     # MetalTensor shape (4, 16)
+c = metal_relu(c)           # MetalTensor shape (4, 16)
+print(c.numpy())            # numpy array back on CPU
+```
 
 - **macOS only** — requires Metal runtime and PyObjC.
 - `attention.metal` and `metal_kernels.metal` must be in the **same directory** as your script at runtime.
-- GPU RAM is capped at 70 GB by default (`GPU_RAM_LIMIT` in `metal_ai.py`). Adjust as needed.
+- GPU RAM is capped at 70 GB by default (`GPU_RAM_LIMIT`). Edit `metal_ai.py` to change it.
